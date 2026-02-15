@@ -35,5 +35,8 @@ COPY scripts/ /app/scripts/
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD python3 -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, GPUs: {torch.cuda.device_count()}')" || exit 1
 
+# RunPod serverless listens on 8000
+EXPOSE 8000
+
 # RunPod serverless entry
 CMD ["python3", "-u", "/app/handler.py"]
