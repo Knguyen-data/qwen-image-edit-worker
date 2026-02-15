@@ -1,0 +1,96 @@
+[
+  {
+    "_comment": "Text to Image — basic",
+    "input": {
+      "job_type": "text2image",
+      "prompt": "a beautiful woman in a red dress standing in a sunlit garden, professional photography, detailed skin texture",
+      "width": 1024,
+      "height": 1024,
+      "steps": 4,
+      "cfg": 1.0,
+      "true_cfg_scale": 4.0,
+      "seed": 42
+    }
+  },
+  {
+    "_comment": "Text to Image — 16:9 landscape",
+    "input": {
+      "job_type": "text2image",
+      "prompt": "cinematic shot of a woman lounging on a beach at golden hour, volumetric lighting",
+      "width": 1280,
+      "height": 720,
+      "steps": 4,
+      "cfg": 1.0,
+      "true_cfg_scale": 4.0,
+      "seed": -1
+    }
+  },
+  {
+    "_comment": "Text to Image — 9:16 portrait (phone)",
+    "input": {
+      "job_type": "text2image",
+      "prompt": "full body portrait of a woman in lingerie, bedroom, soft warm lighting, professional photography",
+      "width": 720,
+      "height": 1280,
+      "steps": 4,
+      "cfg": 1.0,
+      "true_cfg_scale": 4.0,
+      "seed": -1
+    }
+  },
+  {
+    "_comment": "Image Edit — requires image_base64",
+    "input": {
+      "job_type": "image_edit",
+      "prompt": "change her outfit to a bikini, keep the same face and pose",
+      "image_base64": "<BASE64_IMAGE_HERE>",
+      "width": 1024,
+      "height": 1024,
+      "steps": 4,
+      "cfg": 1.0,
+      "seed": -1
+    }
+  },
+  {
+    "_comment": "Face Swap — requires body_base64 + face_base64",
+    "input": {
+      "job_type": "face_swap",
+      "body_base64": "<BASE64_BODY_IMAGE>",
+      "face_base64": "<BASE64_FACE_IMAGE>",
+      "width": 1024,
+      "height": 1024,
+      "steps": 4,
+      "cfg": 1.0,
+      "seed": -1
+    }
+  },
+  {
+    "_comment": "Style Transfer — change outfit while keeping identity",
+    "input": {
+      "job_type": "style_transfer",
+      "prompt": "wearing a black cocktail dress in a luxury penthouse",
+      "image_base64": "<BASE64_IMAGE_HERE>",
+      "width": 1024,
+      "height": 1024,
+      "steps": 4,
+      "cfg": 1.0,
+      "seed": -1
+    }
+  },
+  {
+    "_comment": "With LoRAs — load NSFW + face swap LoRAs",
+    "input": {
+      "job_type": "text2image",
+      "prompt": "a woman posing confidently, professional studio lighting",
+      "width": 1024,
+      "height": 1024,
+      "steps": 4,
+      "cfg": 1.0,
+      "seed": -1,
+      "loras": [
+        {"name": "gnass", "weight": 0.7},
+        {"name": "bfs_face_v5", "weight": 1.0}
+      ]
+    }
+  }
+]

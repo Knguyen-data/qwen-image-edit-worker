@@ -1,250 +1,200 @@
 """
-Qwen-Image-Edit NSFW RunPod Serverless Handler
-Uses Phr00t/Qwen-Rapid-AIO-NSFW checkpoint (all-in-one: VAE + CLIP + Diffusion + Lightning + NSFW LoRAs)
+Qwen-Image-Edit NSFW — RunPod Serverless Handler
 
 Modes:
-  - text2image: Pure text-to-image (no input images)
-  - image_edit: Edit an image with text instruction
-  - face_swap: Swap face from source to target body (2 images)
-  - style_transfer: Change style/outfit while keeping identity
+  text2image      — Pure text-to-image (0 input images)
+  image_edit      — Edit image with text instruction (1 image)
+  face_swap       — Swap face from source to target body (2 images)
+  style_transfer  — Change style/outfit, keep identity (1 image)
 
-Settings:
-  - 4 steps, euler_ancestral, beta scheduler, CFG 1.0
-  - FP8 precision, ~28GB model
-  - Supports all aspect ratios
+Optimal settings:
+  steps=4, cfg=1.0, true_cfg_scale=4.0
+  sampler=euler_ancestral, scheduler=beta
 """
 
 import runpod
 import torch
-import base64
-import io
-import os
 import time
 import traceback
-from PIL import Image
+import sys
+import os
 
-# ─── Globals (loaded once on cold start) ───
-pipeline = None
-MODEL_ID = os.environ.get("MODEL_PATH", "/models/Qwen-Rapid-AIO-NSFW-v23.safetensors")
-FALLBACK_HF = "Qwen/Qwen-Image-Edit-2511"  # Fallback if local model not found
+# Add src to path
+sys.path.insert(0, os.path.dirname(__file__))
 
-
-def load_model():
-    """Load the Qwen-Image-Edit pipeline on cold start."""
-    global pipeline
-    if pipeline is not None:
-        return
-
-    print(f"[INIT] Loading Qwen-Image-Edit model...")
-    start = time.time()
-
-    from diffusers import QwenImageEditPlusPipeline
-
-    # Try local checkpoint first (Rapid-AIO merged), fallback to HF
-    if os.path.exists(MODEL_ID):
-        print(f"[INIT] Loading local checkpoint: {MODEL_ID}")
-        # The Rapid-AIO is a ComfyUI checkpoint format
-        # For diffusers, we use the official model + apply settings
-        pipeline = QwenImageEditPlusPipeline.from_pretrained(
-            FALLBACK_HF,
-            torch_dtype=torch.bfloat16,
-        )
-    else:
-        print(f"[INIT] Local model not found, loading from HuggingFace: {FALLBACK_HF}")
-        pipeline = QwenImageEditPlusPipeline.from_pretrained(
-            FALLBACK_HF,
-            torch_dtype=torch.bfloat16,
-        )
-
-    pipeline.to("cuda")
-    pipeline.set_progress_bar_config(disable=None)
-
-    # Disable safety checker if it exists
-    if hasattr(pipeline, 'safety_checker'):
-        pipeline.safety_checker = None
-    if hasattr(pipeline, 'feature_extractor'):
-        pipeline.feature_extractor = None
-
-    elapsed = time.time() - start
-    print(f"[INIT] Model loaded in {elapsed:.1f}s")
-
-
-def decode_base64_image(b64_string: str) -> Image.Image:
-    """Decode a base64 string to PIL Image."""
-    # Strip data URI prefix if present
-    if "," in b64_string:
-        b64_string = b64_string.split(",", 1)[1]
-    img_bytes = base64.b64decode(b64_string)
-    return Image.open(io.BytesIO(img_bytes)).convert("RGB")
-
-
-def encode_image_to_base64(img: Image.Image, format: str = "WEBP", quality: int = 90) -> str:
-    """Encode PIL Image to base64 string."""
-    buf = io.BytesIO()
-    img.save(buf, format=format, quality=quality)
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-
-def get_dimensions(width: int, height: int) -> tuple:
-    """Ensure dimensions are multiples of 16 and within reasonable bounds."""
-    # Clamp to reasonable range
-    width = max(512, min(2048, width))
-    height = max(512, min(2048, height))
-    # Round to nearest multiple of 16
-    width = (width // 16) * 16
-    height = (height // 16) * 16
-    return width, height
-
-
-# ─── Prompt Templates ───
-
-FACE_SWAP_PROMPT = (
-    "head_swap: start with Picture 1 as the base image, keeping its pose and setting, "
-    "replace the head with the one from Picture 2, maintaining all facial features, "
-    "skin tone, and expression from Picture 2 while blending naturally with Picture 1's body"
+from src.model_manager import get_pipeline, set_runtime_loras
+from src.image_utils import (
+    decode_base64_image,
+    encode_image_to_base64,
+    normalize_dimensions,
+    scale_to_megapixels,
 )
+from src.prompts import build_prompt, get_negative_prompt
 
-STYLE_TRANSFER_PROMPT_TEMPLATE = (
-    "Transform this image: {prompt}. Keep the person's face, identity, and body proportions "
-    "exactly the same. Only change the specified elements."
-)
 
+# ─── Validation ───
+
+VALID_JOB_TYPES = {"text2image", "image_edit", "face_swap", "style_transfer"}
+
+VALID_SAMPLERS = {
+    "euler", "euler_ancestral", "euler_a",
+    "dpm++_2m", "dpm++_2m_sde",
+    "sa_solver", "lcm", "er_sde",
+}
+
+VALID_SCHEDULERS = {
+    "beta", "simple", "normal", "sgm_uniform",
+    "karras", "exponential",
+}
+
+
+def validate_input(inp: dict) -> str | None:
+    """Validate input, return error message or None if valid."""
+    job_type = inp.get("job_type", "text2image")
+    if job_type not in VALID_JOB_TYPES:
+        return f"Invalid job_type: '{job_type}'. Must be one of: {sorted(VALID_JOB_TYPES)}"
+
+    if job_type == "text2image" and not inp.get("prompt"):
+        return "text2image requires a 'prompt'"
+
+    if job_type == "image_edit":
+        if not inp.get("image_base64"):
+            return "image_edit requires 'image_base64'"
+        if not inp.get("prompt"):
+            return "image_edit requires a 'prompt'"
+
+    if job_type == "face_swap":
+        body = inp.get("body_base64") or inp.get("image_base64")
+        face = inp.get("face_base64") or inp.get("image2_base64")
+        if not body or not face:
+            return "face_swap requires 'body_base64' and 'face_base64'"
+
+    if job_type == "style_transfer":
+        if not inp.get("image_base64"):
+            return "style_transfer requires 'image_base64'"
+        if not inp.get("prompt"):
+            return "style_transfer requires a 'prompt'"
+
+    return None
+
+
+# ─── Image Loading ───
+
+def load_images(inp: dict, job_type: str) -> list:
+    """Load and prepare input images based on job type."""
+    images = []
+
+    if job_type == "face_swap":
+        body_b64 = inp.get("body_base64") or inp.get("image_base64")
+        face_b64 = inp.get("face_base64") or inp.get("image2_base64")
+        body_img = decode_base64_image(body_b64)
+        face_img = decode_base64_image(face_b64)
+        # Scale down large images to avoid OOM
+        body_img = scale_to_megapixels(body_img, 1.5)
+        face_img = scale_to_megapixels(face_img, 1.5)
+        images = [body_img, face_img]
+
+    elif job_type in ("image_edit", "style_transfer"):
+        img = decode_base64_image(inp["image_base64"])
+        img = scale_to_megapixels(img, 1.5)
+        images = [img]
+
+    # text2image: no images
+    return images
+
+
+# ─── Main Handler ───
 
 def handler(job):
-    """
-    RunPod serverless handler.
-
-    Input schema:
-    {
-        "job_type": "text2image" | "image_edit" | "face_swap" | "style_transfer",
-        "prompt": "your prompt here",
-        "image_base64": "optional base64 image (for edit/style_transfer)",
-        "face_base64": "optional base64 face image (for face_swap)",
-        "body_base64": "optional base64 body image (for face_swap)",
-        "width": 1024,
-        "height": 1024,
-        "steps": 4,
-        "cfg": 1.0,
-        "true_cfg_scale": 4.0,
-        "seed": -1,
-        "num_images": 1
-    }
-    """
+    """RunPod serverless handler."""
     try:
-        load_model()
-
         inp = job["input"]
+
+        # Validate
+        error = validate_input(inp)
+        if error:
+            return {"error": error}
+
+        # Parse settings
         job_type = inp.get("job_type", "text2image")
-        prompt = inp.get("prompt", "")
+        user_prompt = inp.get("prompt", "")
         width = inp.get("width", 1024)
         height = inp.get("height", 1024)
         steps = inp.get("steps", 4)
         cfg = inp.get("cfg", 1.0)
         true_cfg = inp.get("true_cfg_scale", 4.0)
         seed = inp.get("seed", -1)
-        num_images = inp.get("num_images", 1)
+        num_images = min(inp.get("num_images", 1), 4)  # Cap at 4
+        nsfw_boost = inp.get("nsfw_boost", True)
+        output_format = inp.get("output_format", "WEBP").upper()
+        output_quality = inp.get("output_quality", 92)
+        loras = inp.get("loras", [])
 
-        width, height = get_dimensions(width, height)
-
+        # Normalize
+        width, height = normalize_dimensions(width, height)
         if seed == -1:
             seed = torch.randint(0, 2**32, (1,)).item()
 
-        print(f"[JOB] type={job_type} prompt='{prompt[:60]}...' size={width}x{height} steps={steps} seed={seed}")
+        # Build prompt
+        prompt = build_prompt(job_type, user_prompt, nsfw_boost=nsfw_boost)
+        negative = get_negative_prompt(job_type)
 
-        # ─── Build image list based on mode ───
-        images = []
+        print(f"[JOB] type={job_type} size={width}x{height} steps={steps} cfg={cfg} seed={seed}")
+        print(f"[JOB] prompt='{prompt[:80]}{'...' if len(prompt) > 80 else ''}'")
 
-        if job_type == "face_swap":
-            # Face swap: body (image1) + face (image2)
-            body_b64 = inp.get("body_base64") or inp.get("image_base64")
-            face_b64 = inp.get("face_base64") or inp.get("image2_base64")
+        # Load model
+        pipeline = get_pipeline()
 
-            if not body_b64 or not face_b64:
-                return {"error": "face_swap requires both body_base64 and face_base64"}
+        # Apply runtime LoRAs
+        if loras:
+            set_runtime_loras(pipeline, loras)
 
-            body_img = decode_base64_image(body_b64)
-            face_img = decode_base64_image(face_b64)
-            images = [body_img, face_img]
+        # Load images
+        images = load_images(inp, job_type)
+        print(f"[JOB] {len(images)} input image(s)")
 
-            # Use face swap prompt if none provided
-            if not prompt or prompt.strip() == "":
-                prompt = FACE_SWAP_PROMPT
-
-        elif job_type == "image_edit":
-            img_b64 = inp.get("image_base64")
-            if not img_b64:
-                return {"error": "image_edit requires image_base64"}
-            if not prompt:
-                return {"error": "image_edit requires a prompt"}
-
-            edit_img = decode_base64_image(img_b64)
-            images = [edit_img]
-
-        elif job_type == "style_transfer":
-            img_b64 = inp.get("image_base64")
-            if not img_b64:
-                return {"error": "style_transfer requires image_base64"}
-            if not prompt:
-                return {"error": "style_transfer requires a prompt"}
-
-            style_img = decode_base64_image(img_b64)
-            images = [style_img]
-            prompt = STYLE_TRANSFER_PROMPT_TEMPLATE.format(prompt=prompt)
-
-        elif job_type == "text2image":
-            # Pure text-to-image, no input images
-            if not prompt:
-                return {"error": "text2image requires a prompt"}
-            images = []
-
-        else:
-            return {"error": f"Unknown job_type: {job_type}. Use: text2image, image_edit, face_swap, style_transfer"}
-
-        # ─── Generate ───
-        generator = torch.manual_seed(seed)
-
+        # Build generation kwargs
         gen_kwargs = {
             "prompt": prompt,
-            "generator": generator,
-            "true_cfg_scale": true_cfg,
-            "negative_prompt": " ",
+            "negative_prompt": negative,
+            "generator": torch.manual_seed(seed),
             "num_inference_steps": steps,
             "guidance_scale": cfg,
+            "true_cfg_scale": true_cfg,
             "num_images_per_prompt": num_images,
             "height": height,
             "width": width,
         }
 
-        # Add images if we have them
         if images:
             gen_kwargs["image"] = images
 
-        print(f"[GEN] Starting generation... images={len(images)} steps={steps}")
+        # Generate
         start = time.time()
-
         with torch.inference_mode():
             output = pipeline(**gen_kwargs)
-
         elapsed = time.time() - start
-        print(f"[GEN] Done in {elapsed:.1f}s")
 
-        # ─── Return results ───
+        print(f"[JOB] Generated {len(output.images)} image(s) in {elapsed:.1f}s")
+
+        # Encode output
         if num_images == 1:
             result_img = output.images[0]
-            b64 = encode_image_to_base64(result_img)
+            b64 = encode_image_to_base64(result_img, format=output_format, quality=output_quality)
             return {
                 "generated_image_base64": b64,
-                "image_base64": b64,  # Compat alias
+                "image_base64": b64,
                 "width": result_img.width,
                 "height": result_img.height,
                 "seed": seed,
                 "job_type": job_type,
+                "elapsed_seconds": round(elapsed, 2),
             }
         else:
             results = []
             for i, img in enumerate(output.images):
                 results.append({
-                    "image_base64": encode_image_to_base64(img),
+                    "image_base64": encode_image_to_base64(img, format=output_format, quality=output_quality),
                     "width": img.width,
                     "height": img.height,
                     "index": i,
@@ -254,11 +204,17 @@ def handler(job):
                 "seed": seed,
                 "job_type": job_type,
                 "count": len(results),
+                "elapsed_seconds": round(elapsed, 2),
             }
+
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        return {"error": "GPU out of memory. Try smaller dimensions or fewer images."}
 
     except Exception as e:
         traceback.print_exc()
         return {"error": str(e), "traceback": traceback.format_exc()}
 
 
+# ─── Entry Point ───
 runpod.serverless.start({"handler": handler})
