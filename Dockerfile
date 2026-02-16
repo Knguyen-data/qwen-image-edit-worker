@@ -3,7 +3,8 @@ FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
-ENV HF_HOME=/runpod-volume/huggingface
+ENV HF_HOME=/models/cache
+ENV MODEL_CACHE_DIR=/models
 
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -26,10 +27,16 @@ COPY handler.py /app/handler.py
 COPY src/ /app/src/
 COPY scripts/ /app/scripts/
 
-# Pre-download model at build time (optional — comment out to use network volume instead)
-# RUN python3 -c "from diffusers import QwenImageEditPlusPipeline; \
-#     p = QwenImageEditPlusPipeline.from_pretrained('Qwen/Qwen-Image-Edit-2511', torch_dtype='auto'); \
-#     print('Model downloaded')"
+# Pre-download model into Docker image (~57GB)
+# This makes cold starts instant — no network volume needed
+RUN python3 -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('Qwen/Qwen-Image-Edit-2511', local_dir='/models/qwen-image-edit-2511', local_dir_use_symlinks=False); \
+print('Qwen-Image-Edit-2511 downloaded to /models/qwen-image-edit-2511')"
+
+# Verify model files exist
+RUN ls -la /models/qwen-image-edit-2511/ && \
+    python3 -c "import torch; print(f'PyTorch {torch.__version__}, CUDA available: {torch.cuda.is_available()}')"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \

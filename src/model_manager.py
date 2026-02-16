@@ -12,7 +12,7 @@ _pipeline = None
 _loaded_loras: list[str] = []
 
 # Config from env
-MODEL_CACHE_DIR = os.environ.get("MODEL_CACHE_DIR", "/runpod-volume/models")
+MODEL_CACHE_DIR = os.environ.get("MODEL_CACHE_DIR", "/models")
 MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen-Image-Edit-2511")
 MODEL_PRECISION = os.environ.get("MODEL_PRECISION", "bf16")
 NSFW_LORAS_ENV = os.environ.get("NSFW_LORAS", "")  # comma-separated LoRA names
