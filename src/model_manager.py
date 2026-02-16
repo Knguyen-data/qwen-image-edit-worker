@@ -19,6 +19,11 @@ MODEL_PRECISION = os.environ.get("MODEL_PRECISION", "bf16")
 NSFW_MODEL_DIR = os.environ.get("NSFW_MODEL_DIR", "/models/qwen-nsfw")
 NSFW_LORAS_ENV = os.environ.get("NSFW_LORAS", "")  # comma-separated LoRA names
 
+# Performance optimizations
+ENABLE_ATTENTION_SLICING = os.environ.get("ENABLE_ATTENTION_SLICING", "true").lower() == "true"
+ENABLE_VAE_SLICING = os.environ.get("ENABLE_VAE_SLICING", "true").lower() == "true"
+USE_TORCH_COMPILE = os.environ.get("USE_TORCH_COMPILE", "false").lower() == "true"  # Experimental
+
 # Known NSFW LoRAs (HuggingFace paths)
 LORA_REGISTRY = {
     "gnass": {
@@ -88,6 +93,19 @@ def _load_pipeline():
 
     pipeline.to("cuda")
     pipeline.set_progress_bar_config(disable=None)
+    
+    # Performance optimizations
+    if ENABLE_ATTENTION_SLICING:
+        pipeline.enable_attention_slicing(slice_size="auto")
+        print("[MODEL] Attention slicing enabled (reduces VRAM)")
+    if ENABLE_VAE_SLICING:
+        pipeline.enable_vae_slicing()
+        print("[MODEL] VAE slicing enabled (reduces VRAM)")
+    
+    # Experimental: torch.compile for faster inference (requires PyTorch 2.0+)
+    if USE_TORCH_COMPILE and hasattr(torch, "compile"):
+        print("[MODEL] Compiling transformer with torch.compile (may take 1-2 min first run)...")
+        pipeline.transformer = torch.compile(pipeline.transformer, mode="reduce-overhead")
 
     # Disable any safety filters
     if hasattr(pipeline, "safety_checker"):
