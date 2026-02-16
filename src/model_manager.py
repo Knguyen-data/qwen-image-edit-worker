@@ -15,6 +15,8 @@ _loaded_loras: list[str] = []
 MODEL_CACHE_DIR = os.environ.get("MODEL_CACHE_DIR", "/models")
 MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen-Image-Edit-2511")
 MODEL_PRECISION = os.environ.get("MODEL_PRECISION", "bf16")
+# Phr00t v23 NSFW converted model path (baked into Docker image)
+NSFW_MODEL_DIR = os.environ.get("NSFW_MODEL_DIR", "/models/qwen-nsfw")
 NSFW_LORAS_ENV = os.environ.get("NSFW_LORAS", "")  # comma-separated LoRA names
 
 # Known NSFW LoRAs (HuggingFace paths)
@@ -55,28 +57,34 @@ def get_pipeline():
 
 
 def _load_pipeline():
-    """Load the Qwen-Image-Edit pipeline."""
+    """Load the Qwen-Image-Edit pipeline with Phr00t v23 NSFW weights."""
     from diffusers import QwenImageEditPlusPipeline
 
-    print(f"[MODEL] Loading {MODEL_ID} (precision={MODEL_PRECISION})...")
+    dtype = get_torch_dtype()
     start = time.time()
 
-    dtype = get_torch_dtype()
-
-    # Check for cached model on network volume
-    local_path = os.path.join(MODEL_CACHE_DIR, "qwen-image-edit-2511")
-    if os.path.exists(local_path) and os.listdir(local_path):
-        print(f"[MODEL] Loading from cache: {local_path}")
-        source = local_path
+    # Priority 1: Phr00t v23 NSFW (converted, baked into Docker)
+    if os.path.exists(os.path.join(NSFW_MODEL_DIR, "transformer")):
+        print(f"[MODEL] Loading Phr00t v23 NSFW from {NSFW_MODEL_DIR} (precision={MODEL_PRECISION})...")
+        pipeline = QwenImageEditPlusPipeline.from_pretrained(
+            NSFW_MODEL_DIR,
+            torch_dtype=dtype,
+        )
+    # Priority 2: Cached base model
     else:
-        print(f"[MODEL] Downloading from HuggingFace: {MODEL_ID}")
-        source = MODEL_ID
+        local_path = os.path.join(MODEL_CACHE_DIR, "qwen-image-edit-2511")
+        if os.path.exists(local_path) and os.listdir(local_path):
+            print(f"[MODEL] Loading from cache: {local_path}")
+            source = local_path
+        else:
+            print(f"[MODEL] Downloading from HuggingFace: {MODEL_ID}")
+            source = MODEL_ID
 
-    pipeline = QwenImageEditPlusPipeline.from_pretrained(
-        source,
-        torch_dtype=dtype,
-        cache_dir=MODEL_CACHE_DIR if source == MODEL_ID else None,
-    )
+        pipeline = QwenImageEditPlusPipeline.from_pretrained(
+            source,
+            torch_dtype=dtype,
+            cache_dir=MODEL_CACHE_DIR if source == MODEL_ID else None,
+        )
 
     pipeline.to("cuda")
     pipeline.set_progress_bar_config(disable=None)
